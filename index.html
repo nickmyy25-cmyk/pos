@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <title>TabiTabi POS (全能移动旗舰版)</title>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['Courier New', 'monospace'] },
+                    animation: { 'slide-up': 'slideUp 0.3s ease-out', 'fade-in': 'fadeIn 0.2s ease-out', 'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite' },
+                    keyframes: {
+                        slideUp: { '0%': { transform: 'translateY(100%)' }, '100%': { transform: 'translateY(0)' } },
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Icons & Scanner -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+
+    <!-- React -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: #f1f5f9; -webkit-tap-highlight-color: transparent; }
+        #root { height: 100%; display: flex; flex-direction: column; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .pb-safe { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+        .pt-safe { padding-top: max(1rem, env(safe-area-inset-top)); }
+        
+        #reader__scan_region { background: #000 !important; }
+        #reader__dashboard_section_csr button { background: #3b82f6 !important; color: white !important; padding: 8px 16px !important; border-radius: 12px !important; font-size: 14px !important; font-weight: 600 !important; }
+        
+        input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .thermal-receipt { font-family: 'Courier New', monospace; background: white; color: black; }
+        .receipt-dashed { border-top: 1.5px dashed #000; margin: 6px 0; }
+        .active-icon { filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.4)); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Firebase 模块 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc, addDoc, updateDoc, deleteDoc, increment } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCiPqrbs-IZ-hlGkAJF3muS24Ci2lEDmlA",
+            authDomain: "tabitbai.firebaseapp.com",
+            projectId: "tabitbai",
+            storageBucket: "tabitbai.firebasestorage.app",
+            messagingSenderId: "974229416839",
+            appId: "1:974229416839:web:4858618e5214d2af340122",
+            measurementId: "G-L8SR73Z78T"
+        };
+
+        try {
+            const app = initializeApp(firebaseConfig);
+            const db = getFirestore(app);
+            const auth = getAuth(app);
+            window.firebaseServices = { db, auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, collection, onSnapshot, doc, setDoc, addDoc, updateDoc, deleteDoc, increment, onAuthStateChanged, signInAnonymously, signInWithCustomToken };
+            window.dispatchEvent(new Event('firebaseLoaded'));
+        } catch (e) { console.error("Firebase init failed", e); }
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+        const getMalaysiaRounding = (amount) => {
+            const cents = Math.round(amount * 100);
+            const lastDigit = Math.abs(cents % 10);
+            let adj = 0;
+            if (lastDigit === 1 || lastDigit === 2) adj = -lastDigit;
+            else if (lastDigit === 3 || lastDigit === 4) adj = 5 - lastDigit;
+            else if (lastDigit === 6 || lastDigit === 7) adj = -(lastDigit - 5);
+            else if (lastDigit === 8 || lastDigit === 9) adj = 10 - lastDigit;
+            return adj / 100;
+        };
+
+        const initialReceiptSettings = {
+            storeName: 'TabiTabi Enterprise', regNo: 'MRI/BNR/148/2026',
+            address: 'Lot 12H, First Floor, Jalan Krokop Utama,\n98000 Miri, Sarawak.',
+            phone: '+60-12 266 2086', email: 'TabiTabimyy@gmail.com', footerText: '*** Thank You , Please Come Again ***'
+        };
+
+        // --- 核心扫码器组件 ---
+        function CameraScanner({ onScan, onClose }) {
+            useEffect(() => {
+                const scanner = new Html5QrcodeScanner("reader", { fps: 15, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0, showTorchButtonIfSupported: true });
+                scanner.render((text) => {
+                    if (window.navigator.vibrate) window.navigator.vibrate(100);
+                    const beep = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFRm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTvv7+9v");
+                    beep.play().catch(()=>{});
+                    onScan(text);
+                    scanner.clear().then(onClose);
+                }, (err) => {});
+                return () => scanner.clear().catch(() => {});
+            }, []);
+
+            return (
+                <div className="fixed inset-0 bg-black z-[100] flex flex-col pt-safe">
+                    <div className="flex justify-between items-center p-4 bg-slate-900 text-white shadow-lg">
+                        <span className="font-bold flex items-center gap-2"><i className="ph ph-scan text-blue-400"></i>条码扫描</span>
+                        <button onClick={onClose} className="p-2 bg-slate-800 rounded-full active:scale-90"><i className="ph ph-x text-xl"></i></button>
+                    </div>
+                    <div className="flex-1 bg-black flex items-center justify-center"><div id="reader" className="w-full"></div></div>
+                </div>
+            );
+        }
+
+        // --- 主程序 ---
+        function App() {
+            const [activeTab, setActiveTab] = useState('cashier');
+            const [user, setUser] = useState(null);
+            const [authLoading, setAuthLoading] = useState(true);
+            const [inventory, setInventory] = useState([]);
+            const [groups, setGroups] = useState([]);
+            const [salesHistory, setSalesHistory] = useState([]);
+            const [receiptSettings, setReceiptSettings] = useState(initialReceiptSettings);
+            const [cart, setCart] = useState([]);
+            const [receiptData, setReceiptData] = useState(null);
+            const [toastMessage, setToastMessage] = useState('');
+
+            const showToast = (msg) => { setToastMessage(msg); setTimeout(() => setToastMessage(''), 3000); };
+
+            useEffect(() => {
+                const initAuth = () => {
+                    if (window.firebaseServices) {
+                        const { auth, onAuthStateChanged } = window.firebaseServices;
+                        onAuthStateChanged(auth, (u) => { setUser(u); setAuthLoading(false); });
+                    }
+                };
+                if (window.firebaseServices) initAuth();
+                else window.addEventListener('firebaseLoaded', initAuth);
+            }, []);
+
+            useEffect(() => {
+                if (!user) return;
+                const { db, collection, onSnapshot, doc } = window.firebaseServices;
+                const userDocBase = ['artifacts', 'tabitabi-pos', 'users', user.uid];
+
+                const unsubInv = onSnapshot(collection(db, ...userDocBase, 'inventory'), (s) => {
+                    const items = []; s.forEach(d => items.push(d.data())); setInventory(items);
+                });
+                const unsubGrps = onSnapshot(collection(db, ...userDocBase, 'groups'), (s) => {
+                    const grps = []; s.forEach(d => grps.push(d.data())); setGroups(grps);
+                });
+                const unsubSales = onSnapshot(collection(db, ...userDocBase, 'salesHistory'), (s) => {
+                    const sales = []; s.forEach(d => sales.push(d.data())); 
+                    setSalesHistory(sales.sort((a,b) => new Date(b.date) - new Date(a.date)));
+                });
+                const unsubSett = onSnapshot(doc(db, ...userDocBase, 'settings', 'receipt'), (d) => {
+                    if (d.exists()) setReceiptSettings(d.data());
+                });
+
+                return () => { unsubInv(); unsubGrps(); unsubSales(); unsubSett(); };
+            }, [user]);
+
+            // --- 核心全局方法 ---
+            const handleCheckout = async (data) => {
+                const { db, doc, setDoc, increment } = window.firebaseServices;
+                const receiptNo = `CS-${Date.now().toString().slice(-6)}`;
+                const newSale = { ...data, id: receiptNo, date: new Date().toISOString(), status: 'completed' };
+                try {
+                    await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'salesHistory', receiptNo), newSale);
+                    for (const item of data.items) {
+                        await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', item.product.id.toString()), { stockQty: increment(-item.qty) }, { merge: true });
+                    }
+                    setReceiptData({ ...data, receiptNo, date: new Date().toLocaleDateString('en-GB'), time: new Date().toLocaleTimeString('en-GB') });
+                    setCart([]);
+                    showToast("结账成功");
+                } catch (e) { alert("结账失败: " + e.message); }
+            };
+
+            const toggleQuickItem = async (productId) => {
+                const item = inventory.find(p => p.id === productId);
+                if (!item) return;
+                const { db, doc, setDoc } = window.firebaseServices;
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', productId.toString()), { isQuickItem: !item.isQuickItem }, { merge: true });
+                showToast(item.isQuickItem ? "已移出快捷面板" : "已加入快捷面板");
+            };
+
+            if (authLoading) return <div className="h-full flex flex-col items-center justify-center bg-white"><i className="ph ph-spinner-gap text-5xl text-blue-500 animate-spin"></i><p className="mt-6 font-bold text-slate-500 tracking-wide">系统加载中...</p></div>;
+            if (!user) return <LoginView />;
+
+            return (
+                <>
+                    {toastMessage && <div className="fixed top-12 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-6 py-3 rounded-full shadow-2xl z-[200] flex items-center gap-2 animate-fade-in"><i className="ph-fill ph-check-circle text-emerald-400"></i><span className="text-sm font-bold">{toastMessage}</span></div>}
+                    
+                    <main className="flex-1 overflow-hidden relative">
+                        {activeTab === 'cashier' && <CashierView inventory={inventory} cart={cart} setCart={setCart} onCheckout={handleCheckout} getRounding={getMalaysiaRounding} onToggleQuickItem={toggleQuickItem} />}
+                        {activeTab === 'inventory' && <InventoryView inventory={inventory} groups={groups} user={user} showToast={showToast} />}
+                        {activeTab === 'report' && <ReportView sales={salesHistory} groups={groups} />}
+                        {activeTab === 'orders' && <OrderView sales={salesHistory} inventory={inventory} user={user} getRounding={getMalaysiaRounding} showToast={showToast} />}
+                        {activeTab === 'settings' && <SettingsView settings={receiptSettings} user={user} onLogout={() => window.firebaseServices.signOut(window.firebaseServices.auth)} showToast={showToast} inventory={inventory} groups={groups} salesHistory={salesHistory} setReceiptSettings={setReceiptSettings} />}
+                    </main>
+
+                    <nav className="h-18 min-h-[72px] bg-white border-t border-slate-200 flex items-center justify-around pb-safe no-print z-50 shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+                        {[ { id: 'cashier', icon: 'ph-shopping-cart', label: '收银' }, { id: 'inventory', icon: 'ph-package', label: '库存' }, { id: 'report', icon: 'ph-chart-bar', label: '报表' }, { id: 'orders', icon: 'ph-list-dashes', label: '订单' }, { id: 'settings', icon: 'ph-gear', label: '系统' } ].map(t => (
+                            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`flex flex-col items-center justify-center w-1/5 h-full transition-all active:scale-90 ${activeTab === t.id ? 'text-blue-600' : 'text-slate-400 hover:text-slate-500'}`}>
+                                <i className={`${activeTab === t.id ? 'ph-fill' : 'ph'} ${t.icon} text-2xl mb-1 ${activeTab === t.id ? 'active-icon' : ''}`}></i>
+                                <span className={`text-[11px] font-bold ${activeTab === t.id ? 'opacity-100' : 'opacity-70'}`}>{t.label}</span>
+                            </button>
+                        ))}
+                    </nav>
+
+                    {receiptData && <ReceiptModal data={receiptData} settings={receiptSettings} onClose={() => setReceiptData(null)} />}
+                </>
+            );
+        }
+
+        // --- 子组件: 登录 ---
+        function LoginView() {
+            const [email, setEmail] = useState(''); const [pass, setPass] = useState('');
+            const [isLogin, setIsLogin] = useState(true); const [error, setError] = useState('');
+            const handleAuth = async (e) => {
+                e.preventDefault(); const { auth, signInWithEmailAndPassword, createUserWithEmailAndPassword } = window.firebaseServices;
+                try { if (isLogin) await signInWithEmailAndPassword(auth, email, pass); else await createUserWithEmailAndPassword(auth, email, pass); } catch (err) { setError(err.message); }
+            };
+            return (
+                <div className="h-full bg-slate-900 p-8 flex flex-col justify-center animate-fade-in">
+                    <div className="w-20 h-20 bg-blue-600 rounded-3xl flex items-center justify-center text-white text-4xl font-black mb-10 mx-auto shadow-2xl shadow-blue-500/20">T</div>
+                    <h1 className="text-3xl font-black text-white text-center mb-2 tracking-tight">TabiTabi POS</h1>
+                    <p className="text-slate-400 text-center mb-10 font-medium">全能移动旗舰版</p>
+                    {error && <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-2xl mb-6 text-xs">{error}</div>}
+                    <form onSubmit={handleAuth} className="space-y-4">
+                        <div className="relative"><i className="ph ph-envelope absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"></i><input type="email" placeholder="邮箱账号" className="w-full bg-slate-800/50 border border-slate-700 rounded-2xl pl-12 pr-4 py-4 text-white outline-none focus:border-blue-500" value={email} onChange={e=>setEmail(e.target.value)} required /></div>
+                        <div className="relative"><i className="ph ph-lock absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"></i><input type="password" placeholder="安全密码" className="w-full bg-slate-800/50 border border-slate-700 rounded-2xl pl-12 pr-4 py-4 text-white outline-none focus:border-blue-500" value={pass} onChange={e=>setPass(e.target.value)} required /></div>
+                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold text-lg active:scale-95 transition-all mt-4">{isLogin ? '安全登录' : '创建账号'}</button>
+                    </form>
+                    <button onClick={() => setIsLogin(!isLogin)} className="text-slate-500 mt-8 text-sm font-bold mx-auto">{isLogin ? '申请新账户？' : '已有账户？立即进入'}</button>
+                </div>
+            );
+        }
+
+        // --- 子组件: 收银台 ---
+        function CashierView({ inventory, cart, setCart, onCheckout, getRounding, onToggleQuickItem }) {
+            const [search, setSearch] = useState('');
+            const [showScanner, setShowScanner] = useState(false);
+            const [showCart, setShowCart] = useState(false);
+            const [isEditMode, setIsEditMode] = useState(false);
+            const [discountStr, setDiscountStr] = useState('');
+
+            const filtered = inventory.filter(p => p.stock && (p.name.toLowerCase().includes(search.toLowerCase()) || p.barcode.includes(search)));
+            const quickItems = inventory.filter(p => p.isQuickItem && p.stock);
+            
+            const subtotal = cart.reduce((s, i) => s + (i.customPrice * i.qty), 0);
+            const discount = parseFloat(discountStr) || 0;
+            const totalBeforeRounding = subtotal - discount;
+            const rounding = getRounding(totalBeforeRounding);
+            const netTotal = totalBeforeRounding + rounding;
+
+            const addToCart = (product) => {
+                setCart(prev => {
+                    const existing = prev.find(i => i.product.id === product.id);
+                    if (existing) return prev.map(i => i.product.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+                    return [...prev, { product, qty: 1, customPrice: product.price }];
+                });
+            };
+
+            const handleScan = (code) => {
+                const p = inventory.find(i => i.barcode === code);
+                if (p) addToCart(p); else alert("未找到条码: " + code);
+            };
+
+            return (
+                <div className="flex flex-col h-full bg-slate-50">
+                    <div className="p-4 bg-white flex gap-3 pt-safe shadow-sm sticky top-0 z-10">
+                        <div className="flex-1 relative">
+                            <i className="ph ph-magnifying-glass absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                            <input type="text" placeholder="扫描条码或搜索..." value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-11 pr-4 py-4 bg-slate-100 rounded-2xl outline-none focus:ring-2 ring-blue-500/20 text-sm font-bold text-slate-700" />
+                        </div>
+                        <button onClick={() => setShowScanner(true)} className="w-14 h-14 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-lg active:scale-90"><i className="ph ph-scan text-2xl"></i></button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 no-scrollbar">
+                        <div className="flex justify-between items-center mb-4 mt-2">
+                            <h2 className="font-black text-slate-800 tracking-tight">快捷面板</h2>
+                            <button onClick={() => setIsEditMode(!isEditMode)} className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition-all ${isEditMode ? 'bg-orange-500 text-white' : 'bg-slate-200 text-slate-600'}`}>{isEditMode ? '完成编辑' : '编辑面板'}</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3 mb-8">
+                            {quickItems.map(p => (
+                                <div key={p.id} onClick={() => isEditMode ? onToggleQuickItem(p.id) : addToCart(p)} className={`p-4 bg-white border rounded-2xl relative shadow-sm active:scale-95 transition-all h-28 flex flex-col justify-between ${isEditMode ? 'border-orange-500 border-dashed bg-orange-50/30' : 'border-slate-100'}`}>
+                                    {isEditMode && <div className="absolute -top-2 -right-2 bg-orange-500 text-white w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-md"><i className="ph ph-minus font-black text-xs"></i></div>}
+                                    <p className="text-[10px] text-slate-400 font-mono font-bold">#{p.barcode.slice(-4)}</p>
+                                    <p className="font-bold text-xs text-slate-800 line-clamp-2 leading-snug">{p.name}</p>
+                                    <p className="text-right text-blue-600 font-black text-sm">RM {p.price.toFixed(2)}</p>
+                                </div>
+                            ))}
+                            {isEditMode && <div className="p-4 border-2 border-dashed border-slate-300 rounded-2xl flex flex-col items-center justify-center text-slate-400 h-28 bg-slate-50/50"><i className="ph ph-plus text-2xl mb-1"></i><span className="text-[10px] font-bold mt-1">请在全部列表中点选</span></div>}
+                        </div>
+                        
+                        <h2 className="font-black text-slate-800 mb-4 tracking-tight">全部商品 {search && <span className="text-blue-500">· 筛选中</span>}</h2>
+                        <div className="space-y-2 pb-24">
+                            {filtered.length > 0 ? filtered.map(p => (
+                                <div key={p.id} onClick={() => isEditMode ? onToggleQuickItem(p.id) : addToCart(p)} className={`flex items-center justify-between p-4 bg-white rounded-2xl border active:bg-blue-50 transition-colors shadow-sm ${isEditMode && p.isQuickItem ? 'border-orange-500' : 'border-slate-100'}`}>
+                                    <div className="flex-1 pr-4">
+                                        <p className="font-bold text-slate-800 text-sm line-clamp-1">{p.name}</p>
+                                        <p className="text-[10px] text-slate-400 font-bold mt-1 tracking-wider uppercase">{p.barcode}</p>
+                                    </div>
+                                    <div className="text-right flex flex-col items-end shrink-0">
+                                        <p className="text-blue-600 font-black text-base">RM {p.price.toFixed(2)}</p>
+                                        <p className={`text-[9px] font-black px-1.5 py-0.5 rounded mt-1 ${p.stockQty <= 5 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>QTY: {p.stockQty}</p>
+                                    </div>
+                                </div>
+                            )) : <div className="p-12 text-center text-slate-400"><p className="text-sm font-bold">无匹配记录</p></div>}
+                        </div>
+                    </div>
+
+                    {cart.length > 0 && !isEditMode && (
+                        <div className="fixed bottom-[80px] left-4 right-4 z-[40]">
+                            <button onClick={() => setShowCart(true)} className="w-full bg-slate-900 text-white p-5 rounded-[2rem] flex justify-between items-center shadow-2xl animate-slide-up">
+                                <div className="flex items-center gap-4">
+                                    <div className="relative">
+                                        <div className="bg-blue-600 w-12 h-12 rounded-2xl flex items-center justify-center"><i className="ph-fill ph-shopping-bag text-2xl"></i></div>
+                                        <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black w-6 h-6 rounded-full flex items-center justify-center border-4 border-slate-900">{cart.reduce((s,i)=>s+i.qty,0)}</span>
+                                    </div>
+                                    <div className="text-left"><span className="block text-[10px] font-black text-slate-400 uppercase">当前清单</span><span className="font-black text-sm">查看购物车</span></div>
+                                </div>
+                                <div className="text-right"><span className="block text-[10px] font-black text-slate-400 uppercase">实付金额</span><span className="text-xl font-black text-blue-400">RM {netTotal.toFixed(2)}</span></div>
+                            </button>
+                        </div>
+                    )}
+
+                    {showCart && (
+                        <div className="fixed inset-0 bg-black/60 z-[60] flex flex-col justify-end animate-fade-in">
+                            <div className="absolute inset-0" onClick={()=>setShowCart(false)}></div>
+                            <div className="bg-white rounded-t-[3rem] h-[85%] flex flex-col z-50 animate-slide-up relative shadow-2xl">
+                                <div className="w-16 h-1.5 bg-slate-200 rounded-full mx-auto mt-4 mb-2"></div>
+                                <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                                    <h2 className="text-2xl font-black tracking-tight">结算清单</h2>
+                                    <button onClick={()=>setShowCart(false)} className="bg-slate-100 p-3 rounded-2xl text-slate-400"><i className="ph ph-x text-2xl"></i></button>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-3 no-scrollbar bg-slate-50">
+                                    {cart.map(item => (
+                                        <div key={item.product.id} className="p-5 bg-white rounded-[2rem] border border-slate-100 flex items-center justify-between shadow-sm">
+                                            <div className="flex-1 pr-4">
+                                                <p className="font-black text-slate-800 text-sm line-clamp-1">{item.product.name}</p>
+                                                <div className="flex items-center gap-2 mt-2">
+                                                    <span className="text-xs text-slate-400 font-bold">单价RM</span>
+                                                    <input type="number" step="0.01" value={item.customPrice} onChange={e => setCart(cart.map(i=>i.product.id===item.product.id ? {...i, customPrice: parseFloat(e.target.value)||0} : i))} className="w-16 bg-slate-100 text-blue-600 font-bold px-2 py-1 rounded outline-none" />
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-4 bg-slate-50 p-1.5 rounded-2xl border border-slate-100">
+                                                <button onClick={() => { const n = item.qty - 1; if(n <= 0) setCart(cart.filter(i=>i.product.id!==item.product.id)); else setCart(cart.map(i=>i.product.id===item.product.id ? {...i, qty: n} : i)); }} className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-xl font-bold shadow-sm">-</button>
+                                                <span className="font-black text-base w-4 text-center">{item.qty}</span>
+                                                <button onClick={() => setCart(cart.map(i=>i.product.id===item.product.id ? {...i, qty: item.qty+1} : i))} className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-xl font-bold shadow-sm">+</button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="p-6 bg-white border-t rounded-t-[3rem] space-y-4 shadow-[0_-10px_40px_rgba(0,0,0,0.05)] pb-safe">
+                                    <div className="flex justify-between items-center text-sm font-bold text-slate-500 px-2"><span>Subtotal</span><span>RM {subtotal.toFixed(2)}</span></div>
+                                    <div className="flex justify-between items-center text-sm font-bold text-orange-500 px-2">
+                                        <span>Discount (-)</span>
+                                        <div className="flex items-center bg-orange-50 rounded px-2"><span className="text-xs">RM</span><input type="number" step="0.01" value={discountStr} onChange={e=>setDiscountStr(e.target.value)} className="w-16 bg-transparent text-right outline-none py-1" /></div>
+                                    </div>
+                                    <div className="flex justify-between items-center text-sm font-bold text-slate-500 px-2"><span>Rounding</span><span>RM {rounding.toFixed(2)}</span></div>
+                                    <div className="flex justify-between items-end bg-slate-50 p-5 rounded-[2rem] border border-slate-100 mt-2">
+                                        <span className="text-slate-800 font-black text-lg">Net Total</span>
+                                        <span className="text-3xl font-black text-blue-600 tracking-tighter">RM {netTotal.toFixed(2)}</span>
+                                    </div>
+                                    <button onClick={() => { onCheckout({ items: cart, subtotal, discount, rounding, totalRevenue: netTotal, totalCost: cart.reduce((s,i)=>s+(i.product.cost*i.qty),0), volume: cart.reduce((s,i)=>s+i.qty,0), profit: netTotal - cart.reduce((s,i)=>s+(i.product.cost*i.qty),0) }); setShowCart(false); setDiscountStr(''); }} className="w-full bg-blue-600 text-white py-5 rounded-[2rem] font-black text-xl shadow-xl shadow-blue-600/30 active:scale-95 transition-all mt-2">立即结账</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {showScanner && <CameraScanner onScan={handleScan} onClose={()=>setShowScanner(false)} />}
+                </div>
+            );
+        }
+
+        // --- 子组件: 库存管理 (带全功能) ---
+        function InventoryView({ inventory, groups, user, showToast }) {
+            const [search, setSearch] = useState('');
+            const [filterGroup, setFilterGroup] = useState('all');
+            const [showScanner, setShowScanner] = useState(false);
+            const [editingItem, setEditingItem] = useState(null);
+            const [showGroupManage, setShowGroupManage] = useState(false);
+            const [showRestock, setShowRestock] = useState(false);
+
+            const filtered = inventory.filter(p => {
+                const matchSearch = p.name.toLowerCase().includes(search.toLowerCase()) || p.barcode.includes(search);
+                const matchGroup = filterGroup === 'all' || (filterGroup === 'ungrouped' ? !p.groupId : p.groupId === filterGroup);
+                return matchSearch && matchGroup;
+            });
+
+            const handleSave = async (data) => {
+                const { db, doc, setDoc } = window.firebaseServices;
+                const id = data.id || Date.now().toString();
+                // 溯源记录处理
+                const oldItem = inventory.find(i => i.id === id);
+                let newHistory = oldItem ? [...(oldItem.history || [])] : [];
+                if (!oldItem || oldItem.cost !== data.cost || oldItem.price !== data.price || oldItem.stockQty !== data.stockQty) {
+                    newHistory.unshift({ date: new Date().toISOString(), action: oldItem ? 'EDIT' : 'CREATE', oldCost: oldItem?.cost||0, newCost: data.cost, oldPrice: oldItem?.price||0, newPrice: data.price, stockChange: data.stockQty - (oldItem?.stockQty||0), newStock: data.stockQty });
+                }
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', id), { ...data, id, history: newHistory.slice(0,50) }, { merge: true });
+                setEditingItem(null); showToast("商品已保存");
+            };
+
+            const handleRestock = async (id, addedQty, newCost, newPrice) => {
+                const { db, doc, setDoc, increment } = window.firebaseServices;
+                const item = inventory.find(i => i.id === id);
+                if (!item) return;
+                const finalCost = newCost !== '' ? parseFloat(newCost) : item.cost;
+                const finalPrice = newPrice !== '' ? parseFloat(newPrice) : item.price;
+                const newHistory = [{ date: new Date().toISOString(), action: 'RESTOCK', oldCost: item.cost, newCost: finalCost, oldPrice: item.price, newPrice: finalPrice, stockChange: addedQty, newStock: item.stockQty + addedQty }, ...(item.history || [])].slice(0,50);
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', id.toString()), { stockQty: increment(addedQty), cost: finalCost, price: finalPrice, history: newHistory }, { merge: true });
+                showToast("入库成功"); setShowRestock(false);
+            };
+
+            return (
+                <div className="flex flex-col h-full bg-slate-50">
+                    <div className="p-6 pt-safe bg-white shadow-sm z-10 space-y-4">
+                        <div className="flex justify-between items-center">
+                            <h1 className="text-2xl font-black tracking-tight">库存中心</h1>
+                            <div className="flex gap-2">
+                                <button onClick={()=>setShowScanner(true)} className="w-10 h-10 bg-slate-100 rounded-xl text-blue-600 flex items-center justify-center"><i className="ph ph-scan text-xl"></i></button>
+                                <button onClick={()=>setShowRestock(true)} className="w-10 h-10 bg-emerald-100 rounded-xl text-emerald-600 flex items-center justify-center"><i className="ph ph-box-arrow-down text-xl"></i></button>
+                                <button onClick={()=>setEditingItem({ barcode: '', name: '', cost: 0, price: 0, stockQty: 0, stock: true, groupId: filterGroup !== 'all' && filterGroup !== 'ungrouped' ? filterGroup : '' })} className="w-10 h-10 bg-slate-900 rounded-xl text-white flex items-center justify-center"><i className="ph ph-plus text-xl"></i></button>
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <div className="flex-1 relative">
+                                <i className="ph ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                                <input type="text" placeholder="搜索..." value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-9 pr-3 py-2 bg-slate-100 rounded-xl text-sm font-bold outline-none" />
+                            </div>
+                            <select value={filterGroup} onChange={e=>setFilterGroup(e.target.value)} className="bg-slate-100 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none max-w-[120px]">
+                                <option value="all">全部分组</option>
+                                <option value="ungrouped">未分组</option>
+                                {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                            </select>
+                            <button onClick={()=>setShowGroupManage(true)} className="px-3 bg-slate-100 rounded-xl text-slate-600 text-sm font-bold"><i className="ph ph-folder"></i></button>
+                        </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto px-4 py-4 pb-24 space-y-3 no-scrollbar">
+                        {filtered.map(p => (
+                            <div key={p.id} onClick={()=>setEditingItem(p)} className="p-5 bg-white rounded-[1.5rem] flex justify-between items-center border border-slate-100 shadow-sm active:bg-slate-50">
+                                <div className="flex-1 pr-4">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-[9px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-500 font-bold">{groups.find(g=>g.id===p.groupId)?.name || '未分组'}</span>
+                                    </div>
+                                    <p className="font-black text-slate-800 text-sm leading-tight">{p.name}</p>
+                                    <p className="text-[10px] text-slate-400 font-bold font-mono mt-1.5 uppercase"># {p.barcode}</p>
+                                </div>
+                                <div className="text-right flex flex-col items-end">
+                                    <p className={`font-black text-sm ${p.stockQty <= 5 ? 'text-red-500' : 'text-emerald-600'}`}>{p.stockQty} <span className="text-[9px]">件</span></p>
+                                    <p className="text-[11px] text-blue-600 font-black mt-1">RM {p.price.toFixed(2)}</p>
+                                </div>
+                            </div>
+                        ))}
+                        {filtered.length === 0 && <div className="py-20 text-center text-slate-400 font-bold">无匹配商品记录</div>}
+                    </div>
+
+                    {showScanner && <CameraScanner onScan={(c)=>{setSearch(c); setShowScanner(false);}} onClose={()=>setShowScanner(false)} />}
+                    {editingItem && <ItemFormModal item={editingItem} groups={groups} user={user} showToast={showToast} onSave={handleSave} onClose={()=>setEditingItem(null)} onDelete={async (id) => {
+                        const { db, doc, deleteDoc } = window.firebaseServices;
+                        if(window.confirm('彻底删除该商品？')) { await deleteDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', id.toString())); setEditingItem(null); showToast("商品已删除"); }
+                    }} />}
+                    {showGroupManage && <GroupManagementModal groups={groups} inventory={inventory} user={user} onClose={()=>setShowGroupManage(false)} showToast={showToast} />}
+                    {showRestock && <RestockModal inventory={inventory} onRestock={handleRestock} onClose={()=>setShowRestock(false)} showToast={showToast} onAddNewItem={(barcode) => { setShowRestock(false); setEditingItem({ barcode: barcode || '', name: '', cost: 0, price: 0, stockQty: 0, stock: true, groupId: filterGroup !== 'all' && filterGroup !== 'ungrouped' ? filterGroup : '' }); }} />}
+                </div>
+            );
+        }
+
+        // --- 子组件: 快捷入库 (Restock) ---
+        function RestockModal({ inventory, onRestock, onClose, showToast, onAddNewItem }) {
+            const [search, setSearch] = useState('');
+            const [selectedId, setSelectedId] = useState('');
+            const [qty, setQty] = useState('');
+            const [cost, setCost] = useState('');
+            const [price, setPrice] = useState('');
+
+            const selectedItem = inventory.find(i => i.id === selectedId);
+            const filtered = search ? inventory.filter(p => p.name.includes(search) || p.barcode.includes(search)).slice(0, 5) : [];
+
+            return (
+                <div className="fixed inset-0 bg-black/70 z-[80] flex flex-col justify-end animate-fade-in">
+                    <div className="bg-white rounded-t-[2rem] p-6 pb-safe animate-slide-up space-y-4 shadow-2xl">
+                        <div className="flex justify-between items-center border-b pb-4">
+                            <h2 className="text-xl font-black text-emerald-600 flex items-center gap-2"><i className="ph-fill ph-box-arrow-down"></i>快速入库改价</h2>
+                            <button onClick={onClose} className="p-2 bg-slate-100 rounded-full"><i className="ph ph-x"></i></button>
+                        </div>
+                        {!selectedItem ? (
+                            <div className="space-y-4">
+                                <input type="text" placeholder="搜索条码或名称..." value={search} onChange={e=>setSearch(e.target.value)} className="w-full bg-slate-50 border p-3 rounded-xl font-bold" />
+                                <div className="max-h-48 overflow-y-auto space-y-2">
+                                    {filtered.map(p => <div key={p.id} onClick={() => {setSelectedId(p.id); setCost(p.cost); setPrice(p.price);}} className="p-3 bg-white border rounded-xl font-bold text-sm active:bg-slate-50">{p.name} ({p.stockQty}件)</div>)}
+                                </div>
+                                <button onClick={()=>onAddNewItem(search)} className="w-full bg-blue-50 text-blue-600 border-2 border-dashed border-blue-200 py-4 rounded-xl font-bold text-sm flex justify-center items-center gap-2 active:bg-blue-100 transition-colors">
+                                    <i className="ph ph-plus text-lg"></i> 库中没有？直接录入新商品
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                <div className="p-3 bg-emerald-50 rounded-xl flex justify-between items-center"><span className="font-bold text-emerald-800 text-sm">{selectedItem.name}</span><button onClick={()=>setSelectedId('')} className="text-xs text-emerald-600 font-bold bg-emerald-100 px-2 py-1 rounded">重选</button></div>
+                                <div className="space-y-1"><label className="text-xs font-bold text-slate-500">入库数量 (+)</label><input type="number" value={qty} onChange={e=>setQty(e.target.value)} className="w-full bg-slate-50 border-b-2 border-emerald-500 p-3 outline-none font-black text-lg" placeholder="输入新增件数" /></div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1"><label className="text-xs font-bold text-slate-500">最新进价</label><input type="number" step="0.01" value={cost} onChange={e=>setCost(e.target.value)} className="w-full bg-slate-50 border p-3 rounded-xl font-bold outline-none" /></div>
+                                    <div className="space-y-1"><label className="text-xs font-bold text-slate-500">最新售价</label><input type="number" step="0.01" value={price} onChange={e=>setPrice(e.target.value)} className="w-full bg-slate-50 border p-3 rounded-xl font-bold text-blue-600 outline-none" /></div>
+                                </div>
+                                <button onClick={()=>{ if(parseInt(qty)>0) onRestock(selectedId, parseInt(qty), cost, price); else showToast("请输入有效的入库数量"); }} className="w-full bg-emerald-600 text-white py-4 rounded-xl font-black text-lg mt-4 shadow-lg shadow-emerald-500/20">确认入库</button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- 子组件: 分组管理 ---
+        function GroupManagementModal({ groups, inventory, user, onClose, showToast }) {
+            const [newName, setNewName] = useState('');
+            const handleAdd = async () => {
+                if(!newName.trim()) return;
+                const { db, doc, setDoc } = window.firebaseServices;
+                const id = 'G' + Date.now();
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'groups', id), { id, name: newName.trim() });
+                setNewName(''); showToast("分组已添加");
+            };
+            const handleDelete = async (id, name) => {
+                if(inventory.some(i=>i.groupId === id)) { alert(`【${name}】分组下有商品，无法删除`); return; }
+                if(window.confirm('确认删除分组？')) {
+                    const { db, doc, deleteDoc } = window.firebaseServices;
+                    await deleteDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'groups', id));
+                    showToast("分组已删除");
+                }
+            };
+            return (
+                <div className="fixed inset-0 bg-black/70 z-[80] flex flex-col justify-end animate-fade-in">
+                    <div className="bg-white rounded-t-[2rem] p-6 pb-safe h-[70%] flex flex-col animate-slide-up shadow-2xl">
+                        <div className="flex justify-between items-center border-b pb-4 mb-4">
+                            <h2 className="text-xl font-black flex items-center gap-2"><i className="ph-fill ph-folder text-blue-500"></i>分组管理</h2>
+                            <button onClick={onClose} className="p-2 bg-slate-100 rounded-full"><i className="ph ph-x"></i></button>
+                        </div>
+                        <div className="flex gap-2 mb-4">
+                            <input type="text" placeholder="新分组名称..." value={newName} onChange={e=>setNewName(e.target.value)} className="flex-1 bg-slate-50 border p-3 rounded-xl font-bold text-sm outline-none" />
+                            <button onClick={handleAdd} className="bg-slate-900 text-white px-4 rounded-xl font-bold text-sm">添加</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto space-y-2 no-scrollbar">
+                            {groups.map(g => (
+                                <div key={g.id} className="flex justify-between items-center p-4 bg-slate-50 rounded-xl border border-slate-100">
+                                    <span className="font-bold text-sm">{g.name}</span>
+                                    <button onClick={()=>handleDelete(g.id, g.name)} className="text-red-500 p-2 bg-red-50 rounded-lg"><i className="ph ph-trash"></i></button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- 子组件: 商品编辑 ---
+        function ItemFormModal({ item, groups, onSave, onClose, onDelete, user, showToast }) {
+            const [formData, setFormData] = useState({ ...item });
+            const [showScanner, setShowScanner] = useState(false);
+            const [showHistory, setShowHistory] = useState(false);
+            const [showNewGroupInput, setShowNewGroupInput] = useState(false);
+            const [newGroupName, setNewGroupName] = useState('');
+
+            const handleAddGroup = async () => {
+                if(!newGroupName.trim()) return;
+                const { db, doc, setDoc } = window.firebaseServices;
+                const id = 'G' + Date.now();
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'groups', id), { id, name: newGroupName.trim() });
+                setFormData({...formData, groupId: id});
+                setNewGroupName('');
+                setShowNewGroupInput(false);
+                if(showToast) showToast("新分组已建立并选中");
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/70 z-[60] flex flex-col justify-end animate-fade-in">
+                    <div className="bg-white rounded-t-[2rem] h-[92%] flex flex-col shadow-2xl animate-slide-up">
+                        <div className="p-6 border-b flex justify-between items-center">
+                            <h2 className="text-xl font-black tracking-tight">{item.id ? '编辑商品' : '新增商品'}</h2>
+                            <div className="flex gap-3">
+                                {item.id && <button onClick={()=>setShowHistory(true)} className="bg-orange-100 text-orange-600 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1"><i className="ph ph-clock-counter-clockwise"></i>溯源</button>}
+                                <button onClick={onClose} className="bg-slate-100 p-2 rounded-xl text-slate-400"><i className="ph ph-x text-xl"></i></button>
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6 no-scrollbar pb-24">
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-slate-400 uppercase">商品条码 (Barcode)</label>
+                                <div className="flex gap-2">
+                                    <input type="text" value={formData.barcode} onChange={e=>setFormData({...formData, barcode: e.target.value})} className="flex-1 bg-slate-50 border-b-2 border-slate-200 p-3 outline-none focus:border-blue-500 font-mono font-bold text-sm rounded-t-xl" />
+                                    <button onClick={()=>setShowScanner(true)} className="bg-blue-600 w-12 rounded-xl text-white shadow-md"><i className="ph ph-scan text-xl"></i></button>
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-slate-400 uppercase">商品名称</label>
+                                <input type="text" value={formData.name} onChange={e=>setFormData({...formData, name: e.target.value})} className="w-full bg-slate-50 border-b-2 border-slate-200 p-3 outline-none focus:border-blue-500 font-bold text-sm rounded-t-xl" />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-slate-400 uppercase">所属分组</label>
+                                {showNewGroupInput ? (
+                                    <div className="flex gap-2">
+                                        <input autoFocus type="text" placeholder="输入新分组名称..." value={newGroupName} onChange={e=>setNewGroupName(e.target.value)} className="flex-1 bg-slate-50 border-b-2 border-blue-500 p-3 outline-none font-bold text-sm rounded-t-xl" />
+                                        <button onClick={handleAddGroup} className="bg-blue-600 text-white px-4 rounded-xl text-xs font-bold shadow-md">保存</button>
+                                        <button onClick={()=>setShowNewGroupInput(false)} className="bg-slate-200 text-slate-600 px-4 rounded-xl text-xs font-bold">取消</button>
+                                    </div>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <select value={formData.groupId||''} onChange={e=>setFormData({...formData, groupId: e.target.value})} className="flex-1 bg-slate-50 border-b-2 border-slate-200 p-3 outline-none focus:border-blue-500 font-bold text-sm rounded-t-xl">
+                                            <option value="">未分组</option>
+                                            {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                                        </select>
+                                        <button onClick={()=>setShowNewGroupInput(true)} className="bg-slate-100 text-blue-600 px-4 rounded-xl flex items-center justify-center font-bold text-xl border border-slate-200 active:bg-slate-200 shadow-sm">+</button>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase">进价(Cost)</label>
+                                    <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-xs">RM</span><input type="number" step="0.01" value={formData.cost} onChange={e=>setFormData({...formData, cost: parseFloat(e.target.value)||0})} className="w-full bg-slate-50 border-b-2 border-slate-200 pl-10 pr-3 py-3 outline-none focus:border-blue-500 font-black text-sm rounded-t-xl" /></div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase">售价(Price)</label>
+                                    <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-blue-400 text-xs">RM</span><input type="number" step="0.01" value={formData.price} onChange={e=>setFormData({...formData, price: parseFloat(e.target.value)||0})} className="w-full bg-slate-50 border-b-2 border-slate-200 pl-10 pr-3 py-3 outline-none focus:border-blue-500 font-black text-blue-600 text-sm rounded-t-xl" /></div>
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-slate-400 uppercase">物理库存</label>
+                                <input type="number" value={formData.stockQty} onChange={e=>setFormData({...formData, stockQty: parseInt(e.target.value)||0})} className="w-full bg-slate-50 border-b-2 border-slate-200 p-3 outline-none focus:border-blue-500 font-black text-sm rounded-t-xl" />
+                            </div>
+                        </div>
+                        <div className="p-6 bg-white border-t flex gap-4 pb-safe shadow-[0_-10px_20px_rgba(0,0,0,0.05)]">
+                            {item.id && <button onClick={()=>onDelete(item.id)} className="w-16 h-14 bg-red-50 text-red-600 rounded-2xl flex items-center justify-center active:bg-red-100 border border-red-100"><i className="ph-fill ph-trash text-2xl"></i></button>}
+                            <button onClick={()=>onSave(formData)} className="flex-1 bg-slate-900 text-white rounded-2xl font-black text-lg shadow-xl shadow-slate-900/20 active:scale-95 transition-all">保存</button>
+                        </div>
+                    </div>
+
+                    {/* 历史溯源弹窗 */}
+                    {showHistory && (
+                        <div className="absolute inset-0 bg-slate-50 z-[70] flex flex-col rounded-t-[2rem] animate-slide-up">
+                            <div className="p-6 border-b flex justify-between items-center bg-white rounded-t-[2rem]">
+                                <h3 className="font-black flex items-center gap-2"><i className="ph-fill ph-clock-counter-clockwise text-orange-500"></i>价格操作溯源</h3>
+                                <button onClick={()=>setShowHistory(false)} className="bg-slate-100 p-2 rounded-full text-slate-500"><i className="ph ph-x"></i></button>
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-4 space-y-3 no-scrollbar">
+                                {(!item.history || item.history.length === 0) ? <p className="text-center py-10 text-slate-400 font-bold text-sm">暂无操作记录</p> : 
+                                    item.history.map((h, i) => (
+                                        <div key={i} className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm space-y-2">
+                                            <div className="flex justify-between items-center border-b border-dashed pb-2">
+                                                <span className={`text-[10px] font-black px-2 py-1 rounded uppercase ${h.action==='CREATE'?'bg-blue-100 text-blue-600':h.action==='RESTOCK'?'bg-emerald-100 text-emerald-600':'bg-purple-100 text-purple-600'}`}>{h.action}</span>
+                                                <span className="text-[10px] text-slate-400 font-bold">{new Date(h.date).toLocaleString('en-GB')}</span>
+                                            </div>
+                                            <div className="flex justify-between text-xs font-bold text-slate-600">
+                                                <span>进价: <span className="line-through opacity-50">RM{h.oldCost.toFixed(2)}</span> <i className="ph ph-arrow-right mx-1"></i> <span className="text-slate-800">RM{h.newCost.toFixed(2)}</span></span>
+                                                <span>售价: <span className="line-through opacity-50">RM{h.oldPrice.toFixed(2)}</span> <i className="ph ph-arrow-right mx-1"></i> <span className="text-blue-600">RM{h.newPrice.toFixed(2)}</span></span>
+                                            </div>
+                                            <div className="text-xs font-bold text-slate-600">库存变动: <span className={h.stockChange>0?'text-emerald-600':h.stockChange<0?'text-red-500':''}>{h.stockChange>0?'+':''}{h.stockChange}</span> <span className="opacity-50 ml-2">(结余 {h.newStock})</span></div>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+                    )}
+                    {showScanner && <CameraScanner onScan={(c)=>setFormData({...formData, barcode: c})} onClose={()=>setShowScanner(false)} />}
+                </div>
+            );
+        }
+
+        // --- 子组件: 报表 (带日期筛选与分类图) ---
+        function ReportView({ sales, groups }) {
+            const todayStr = new Date().toISOString().split('T')[0];
+            const [filterType, setFilterType] = useState('day');
+            const [filterDate, setFilterDate] = useState(todayStr);
+
+            const filteredSales = useMemo(() => {
+                return sales.filter(s => {
+                    if (s.status !== 'completed') return false;
+                    const sd = s.date.split('T')[0];
+                    if (filterType === 'day') return sd === filterDate;
+                    if (filterType === 'month') return sd.startsWith(filterDate.slice(0, 7));
+                    if (filterType === 'year') return sd.startsWith(filterDate.slice(0, 4));
+                    return true;
+                });
+            }, [sales, filterType, filterDate]);
+
+            const stats = useMemo(() => filteredSales.reduce((acc, s) => {
+                acc.revenue += s.totalRevenue; acc.profit += (s.profit || 0); acc.orders += 1; acc.cost += (s.totalCost||0);
+                s.items.forEach(i => {
+                    const gid = i.product.groupId || 'ungrouped';
+                    if(!acc.groupSales[gid]) acc.groupSales[gid] = 0;
+                    acc.groupSales[gid] += (i.customPrice * i.qty);
+                });
+                return acc;
+            }, { revenue: 0, profit: 0, cost: 0, orders: 0, groupSales: {} }), [filteredSales]);
+
+            const sortedGroups = Object.entries(stats.groupSales).sort((a,b)=>b[1]-a[1]);
+
+            return (
+                <div className="h-full flex flex-col bg-slate-50">
+                    <div className="p-6 pt-safe bg-white shadow-sm z-10 space-y-4">
+                        <h1 className="text-2xl font-black tracking-tight">数据分析</h1>
+                        <div className="flex gap-2">
+                            <select value={filterType} onChange={e=>setFilterType(e.target.value)} className="bg-slate-100 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none">
+                                <option value="day">按日</option><option value="month">按月</option><option value="year">按年</option><option value="all">全量</option>
+                            </select>
+                            {filterType !== 'all' && (
+                                <input type={filterType==='day'?'date':filterType==='month'?'month':'number'} value={filterType==='year'?filterDate.slice(0,4):filterType==='month'?filterDate.slice(0,7):filterDate} onChange={e=>{
+                                    if(filterType==='year') setFilterDate(e.target.value+'-01-01');
+                                    else if(filterType==='month') setFilterDate(e.target.value+'-01');
+                                    else setFilterDate(e.target.value);
+                                }} className="flex-1 bg-slate-100 rounded-xl px-3 py-2 text-sm font-bold text-blue-600 outline-none" />
+                            )}
+                        </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-4 space-y-6 no-scrollbar pb-24">
+                        <div className="bg-gradient-to-br from-blue-600 to-indigo-800 rounded-[2rem] p-6 text-white shadow-lg relative overflow-hidden">
+                            <div className="absolute -right-8 -top-8 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+                            <p className="text-[10px] text-blue-200 font-black uppercase tracking-widest mb-1">筛选营业额</p>
+                            <p className="text-4xl font-black tracking-tighter">RM {stats.revenue.toFixed(2)}</p>
+                            <div className="mt-6 flex justify-between pt-4 border-t border-white/10">
+                                <div><p className="text-[9px] text-blue-200 uppercase font-black">成本</p><p className="text-sm font-bold text-orange-300">RM{stats.cost.toFixed(2)}</p></div>
+                                <div><p className="text-[9px] text-blue-200 uppercase font-black">利润</p><p className="text-sm font-bold text-emerald-300">RM{stats.profit.toFixed(2)}</p></div>
+                                <div className="text-right"><p className="text-[9px] text-blue-200 uppercase font-black">成交单数</p><p className="text-sm font-bold">{stats.orders} 单</p></div>
+                            </div>
+                        </div>
+
+                        <div className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100">
+                            <h3 className="font-black text-sm text-slate-800 mb-4 tracking-tight">分类营收占比</h3>
+                            <div className="space-y-4">
+                                {sortedGroups.length > 0 ? sortedGroups.map(([gid, rev]) => {
+                                    const gName = groups.find(g=>g.id===gid)?.name || '未分组';
+                                    const pct = stats.revenue > 0 ? ((rev/stats.revenue)*100).toFixed(1) : 0;
+                                    return (
+                                        <div key={gid}>
+                                            <div className="flex justify-between text-xs font-bold mb-1"><span className="text-slate-700">{gName}</span><span className="text-slate-500">RM{rev.toFixed(2)} ({pct}%)</span></div>
+                                            <div className="w-full bg-slate-100 rounded-full h-1.5"><div className="bg-emerald-500 h-full rounded-full" style={{width: `${pct}%`}}></div></div>
+                                        </div>
+                                    )
+                                }) : <p className="text-center text-xs text-slate-400 font-bold">该时段无分类数据</p>}
+                            </div>
+                        </div>
+                        
+                        <div className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100">
+                            <h3 className="font-black text-sm text-slate-800 mb-4 tracking-tight">最近 20 笔筛选流水</h3>
+                            <div className="space-y-3">
+                                {filteredSales.slice(0, 20).map(s => (
+                                    <div key={s.id} className="flex justify-between items-center border-b border-dashed border-slate-100 pb-2 last:border-0">
+                                        <div><p className="font-bold text-[11px] text-slate-800">{s.id}</p><p className="text-[9px] text-slate-400 font-bold mt-0.5">{new Date(s.date).toLocaleString('en-GB')}</p></div>
+                                        <p className="font-black text-sm text-blue-600">RM {s.totalRevenue.toFixed(2)}</p>
+                                    </div>
+                                ))}
+                                {filteredSales.length===0 && <p className="text-center text-xs text-slate-400 font-bold">无流水</p>}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- 子组件: 订单管理 (带高级编辑) ---
+        function OrderView({ sales, inventory, user, getRounding, showToast }) {
+            const todayStr = new Date().toISOString().split('T')[0];
+            const [filterType, setFilterType] = useState('day');
+            const [filterDate, setFilterDate] = useState(todayStr);
+            const [search, setSearch] = useState('');
+            const [selected, setSelected] = useState(null);
+            const [editData, setEditData] = useState(null);
+            const [itemToAdd, setItemToAdd] = useState('');
+
+            const filteredSales = useMemo(() => {
+                return sales.filter(s => {
+                    const matchSearch = s.id.includes(search);
+                    const sd = s.date.split('T')[0];
+                    let matchDate = true;
+                    if (filterType === 'day') matchDate = sd === filterDate;
+                    else if (filterType === 'month') matchDate = sd.startsWith(filterDate.slice(0, 7));
+                    else if (filterType === 'year') matchDate = sd.startsWith(filterDate.slice(0, 4));
+                    return matchSearch && matchDate;
+                });
+            }, [sales, filterType, filterDate, search]);
+
+            const handleStatus = async (id, status) => {
+                const { db, doc, updateDoc, increment } = window.firebaseServices;
+                const order = sales.find(s => s.id === id);
+                try {
+                    await updateDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'salesHistory', id), { status });
+                    for (const item of order.items) {
+                        await updateDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'inventory', item.product.id.toString()), { stockQty: increment(status === 'voided' ? item.qty : -item.qty) });
+                    }
+                    setSelected(null); showToast(status==='voided'?'订单已作废':'订单已恢复');
+                } catch(e) { alert("操作失败"); }
+            };
+
+            const handleDelete = async (id) => {
+                if(window.confirm('⚠️ 彻底删除订单不可恢复，且不退还库存，确定删除？')) {
+                    const { db, doc, deleteDoc } = window.firebaseServices;
+                    await deleteDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'salesHistory', id));
+                    setSelected(null); showToast("订单已彻底删除");
+                }
+            };
+
+            const openEdit = (order) => { setEditData(JSON.parse(JSON.stringify(order))); setSelected(null); };
+
+            const recalcEdit = (items, discount) => {
+                const subtotal = items.reduce((s,i)=>s+(i.customPrice*i.qty),0);
+                const total = subtotal - discount; const rounding = getRounding(total); const netTotal = total + rounding;
+                setEditData(prev => ({...prev, items, subtotal, discount, rounding, totalRevenue: netTotal, totalCost: items.reduce((s,i)=>s+(i.product.cost*i.qty),0)}));
+            };
+
+            const handleSaveEdit = async () => {
+                const { db, doc, setDoc } = window.firebaseServices;
+                await setDoc(doc(db, 'artifacts', 'tabitabi-pos', 'users', user.uid, 'salesHistory', editData.id), editData);
+                setEditData(null); showToast("订单修改已保存 (注:库存未自动补平,需手动盘点)");
+            };
+
+            return (
+                <div className="h-full flex flex-col bg-slate-50">
+                    <div className="p-6 pt-safe bg-white shadow-sm z-10 space-y-4">
+                        <h1 className="text-2xl font-black tracking-tight">订单中心</h1>
+                        <div className="flex gap-2">
+                            <select value={filterType} onChange={e=>setFilterType(e.target.value)} className="bg-slate-100 rounded-xl px-2 py-2 text-xs font-bold text-slate-700 outline-none">
+                                <option value="day">按日</option><option value="month">按月</option><option value="year">按年</option><option value="all">全量</option>
+                            </select>
+                            {filterType !== 'all' && (
+                                <input type={filterType==='day'?'date':filterType==='month'?'month':'number'} value={filterType==='year'?filterDate.slice(0,4):filterType==='month'?filterDate.slice(0,7):filterDate} onChange={e=>{
+                                    if(filterType==='year') setFilterDate(e.target.value+'-01-01'); else if(filterType==='month') setFilterDate(e.target.value+'-01'); else setFilterDate(e.target.value);
+                                }} className="bg-slate-100 rounded-xl px-2 py-2 text-xs font-bold text-blue-600 outline-none w-28" />
+                            )}
+                            <input type="text" placeholder="搜单号" value={search} onChange={e=>setSearch(e.target.value)} className="flex-1 bg-slate-100 rounded-xl px-3 py-2 text-xs font-bold outline-none" />
+                        </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 no-scrollbar pb-24">
+                        {filteredSales.map(s => (
+                            <div key={s.id} onClick={()=>setSelected(s)} className="p-4 bg-white rounded-2xl border border-slate-100 flex justify-between items-center shadow-sm active:bg-slate-50">
+                                <div><p className="font-black text-sm text-slate-800 tracking-tight">{s.id}</p><p className="text-[9px] text-slate-400 font-bold mt-1 uppercase tracking-wider">{new Date(s.date).toLocaleString('en-GB')}</p></div>
+                                <div className="text-right">
+                                    <p className={`font-black text-sm ${s.status === 'completed' ? 'text-slate-900' : 'text-red-400 line-through'}`}>RM {s.totalRevenue.toFixed(2)}</p>
+                                    <p className={`text-[9px] font-black mt-0.5 uppercase tracking-widest ${s.status === 'completed' ? 'text-blue-500' : 'text-red-400'}`}>{s.status === 'completed' ? '已完成' : '已作废'}</p>
+                                </div>
+                            </div>
+                        ))}
+                        {filteredSales.length===0 && <p className="text-center text-sm text-slate-400 font-bold pt-10">暂无订单</p>}
+                    </div>
+
+                    {/* 查看详情弹窗 */}
+                    {selected && (
+                        <div className="fixed inset-0 bg-black/70 z-[70] flex flex-col justify-end animate-fade-in">
+                            <div className="bg-white rounded-t-[2rem] p-6 pb-safe space-y-4 max-h-[85%] overflow-y-auto no-scrollbar animate-slide-up">
+                                <div className="flex justify-between items-center border-b pb-4"><h3 className="text-lg font-black tracking-tight">{selected.id} {selected.status==='voided'&&<span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded">作废</span>}</h3><button onClick={()=>setSelected(null)} className="p-2 bg-slate-100 rounded-full"><i className="ph ph-x"></i></button></div>
+                                <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                                    {selected.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-sm font-bold"><span className="text-slate-800 line-clamp-1 flex-1">{i.product.name} <span className="text-slate-400">x{i.qty}</span></span><span className="font-black shrink-0">RM {(i.customPrice*i.qty).toFixed(2)}</span></div>))}
+                                </div>
+                                <div className="space-y-1 pt-2">
+                                    <div className="flex justify-between text-xs font-black text-slate-400 uppercase"><span>SUBTOTAL</span><span>RM {selected.subtotal.toFixed(2)}</span></div>
+                                    <div className="flex justify-between text-xs font-black text-slate-400 uppercase"><span>DISCOUNT</span><span>RM {(selected.discount||0).toFixed(2)}</span></div>
+                                    <div className="flex justify-between font-black text-xl pt-2 text-blue-600 tracking-tighter uppercase"><span>NET TOTAL</span><span>RM {selected.totalRevenue.toFixed(2)}</span></div>
+                                </div>
+                                <div className="flex flex-wrap gap-2 pt-4">
+                                    {selected.status === 'completed' ? <button onClick={()=>handleStatus(selected.id, 'voided')} className="flex-1 py-3 bg-red-50 text-red-600 rounded-xl font-black text-sm">作废退库</button> : <button onClick={()=>handleStatus(selected.id, 'completed')} className="flex-1 py-3 bg-emerald-50 text-emerald-600 rounded-xl font-black text-sm">恢复入账</button>}
+                                    {selected.status === 'completed' && <button onClick={()=>openEdit(selected)} className="flex-1 py-3 bg-blue-50 text-blue-600 rounded-xl font-black text-sm">高级编辑</button>}
+                                    <button onClick={()=>handleDelete(selected.id)} className="w-12 bg-slate-100 text-slate-400 rounded-xl flex items-center justify-center"><i className="ph-fill ph-trash text-lg"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 高级编辑弹窗 */}
+                    {editData && (
+                        <div className="fixed inset-0 bg-black/80 z-[80] flex flex-col justify-end animate-fade-in">
+                            <div className="bg-white rounded-t-[2rem] p-6 pb-safe h-[90%] flex flex-col animate-slide-up shadow-2xl">
+                                <div className="flex justify-between items-center border-b pb-4 mb-4"><h3 className="text-lg font-black text-blue-600"><i className="ph-fill ph-pencil-simple mr-1"></i>编辑订单</h3><button onClick={()=>setEditData(null)} className="p-2 bg-slate-100 rounded-full"><i className="ph ph-x"></i></button></div>
+                                <div className="flex-1 overflow-y-auto space-y-4 no-scrollbar pb-4">
+                                    <div className="flex gap-2">
+                                        <select value={itemToAdd} onChange={e=>setItemToAdd(e.target.value)} className="flex-1 bg-slate-50 border p-2 rounded-xl text-xs font-bold outline-none"><option value="">+ 选择新增商品</option>{inventory.filter(p=>p.stock).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                                        <button onClick={()=>{ if(itemToAdd){ const p=inventory.find(i=>i.id.toString()===itemToAdd); if(p) { const ni=[...editData.items]; const ex=ni.find(i=>i.product.id===p.id); if(ex)ex.qty++; else ni.push({product:p, qty:1, customPrice:p.price}); recalcEdit(ni, editData.discount); setItemToAdd(''); } } }} className="bg-blue-600 text-white px-4 rounded-xl text-xs font-bold">添加</button>
+                                    </div>
+                                    <div className="space-y-3">
+                                        {editData.items.map((item, idx) => (
+                                            <div key={idx} className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-2 relative">
+                                                <button onClick={()=>recalcEdit(editData.items.filter((_,i)=>i!==idx), editData.discount)} className="absolute top-2 right-2 text-red-400 bg-red-50 p-1 rounded"><i className="ph-fill ph-trash"></i></button>
+                                                <p className="font-bold text-sm pr-6 line-clamp-1">{item.product.name}</p>
+                                                <div className="flex gap-2">
+                                                    <div className="flex-1"><label className="text-[10px] text-slate-400 font-bold">单价</label><input type="number" step="0.01" value={item.customPrice} onChange={e=>{const ni=[...editData.items]; ni[idx].customPrice=parseFloat(e.target.value)||0; recalcEdit(ni,editData.discount);}} className="w-full bg-white border p-1 rounded font-bold text-xs" /></div>
+                                                    <div className="w-16"><label className="text-[10px] text-slate-400 font-bold">数量</label><input type="number" value={item.qty} onChange={e=>{const ni=[...editData.items]; ni[idx].qty=parseInt(e.target.value)||1; recalcEdit(ni,editData.discount);}} className="w-full bg-white border p-1 rounded font-bold text-xs text-center" /></div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="bg-slate-50 p-4 rounded-xl space-y-2">
+                                        <div className="flex justify-between text-xs font-bold text-slate-500"><span>折扣 (Discount)</span><input type="number" step="0.01" value={editData.discount||''} onChange={e=>recalcEdit(editData.items, parseFloat(e.target.value)||0)} className="w-16 bg-white border rounded px-1 text-right text-orange-500 outline-none" placeholder="0.00"/></div>
+                                        <div className="flex justify-between font-black text-blue-600 pt-2 border-t"><span>新结算总计</span><span>RM {editData.totalRevenue.toFixed(2)}</span></div>
+                                    </div>
+                                </div>
+                                <button onClick={handleSaveEdit} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-lg">保存订单修改</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- 子组件: 设置与备份 ---
+        function SettingsView({ settings, user, onLogout, showToast, inventory, groups, salesHistory, setReceiptSettings }) {
+            const fileRef = useRef(null);
+            
+            const handleExport = () => {
+                const data = { receiptSettings: settings, inventory, groups, salesHistory, exportDate: new Date().toISOString() };
+                const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = `TabiTabi_Backup_${new Date().toISOString().split('T')[0]}.json`;
+                a.click(); URL.revokeObjectURL(url); showToast("备份文件已下载");
+            };
+
+            const handleImport = async (e) => {
+                const file = e.target.files[0]; if(!file) return;
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const parsed = JSON.parse(event.target.result);
+                        if(window.confirm('⚠️ 恢复备份将覆盖当前账号在云端的所有数据！确定继续？')) {
+                            const { db, doc, setDoc } = window.firebaseServices;
+                            const base = ['artifacts', 'tabitabi-pos', 'users', user.uid];
+                            if(parsed.receiptSettings) { await setDoc(doc(db, ...base, 'settings', 'receipt'), parsed.receiptSettings); setReceiptSettings(parsed.receiptSettings); }
+                            if(parsed.groups) for(const g of parsed.groups) await setDoc(doc(db, ...base, 'groups', g.id), g);
+                            if(parsed.inventory) for(const i of parsed.inventory) await setDoc(doc(db, ...base, 'inventory', i.id.toString()), i);
+                            if(parsed.salesHistory) for(const s of parsed.salesHistory) await setDoc(doc(db, ...base, 'salesHistory', s.id), s);
+                            showToast("数据恢复成功，云端已同步");
+                        }
+                    } catch(err) { alert("文件解析失败"); }
+                };
+                reader.readAsText(file); e.target.value = '';
+            };
+
+            return (
+                <div className="h-full p-6 pt-safe space-y-6 flex flex-col bg-slate-50 overflow-y-auto pb-24">
+                    <h1 className="text-2xl font-black tracking-tight">系统设置</h1>
+                    
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 flex items-center justify-between">
+                        <div className="flex items-center gap-3"><div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-500"><i className="ph-fill ph-user-circle text-2xl"></i></div><div><p className="text-[10px] text-slate-400 font-black uppercase">Current User</p><p className="font-bold text-sm text-slate-800">{user.email}</p></div></div>
+                        <button onClick={onLogout} className="bg-red-50 text-red-600 px-4 py-2 rounded-xl font-bold text-xs">退出</button>
+                    </div>
+
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-4">
+                        <h3 className="font-black text-slate-800 text-sm flex items-center gap-2"><i className="ph-fill ph-hard-drives text-emerald-500"></i>本地数据备份与恢复</h3>
+                        <p className="text-[10px] text-slate-400 font-bold leading-relaxed">一键导出当前账号的所有商品、流水、分组为JSON文件，防止意外丢失。</p>
+                        <div className="flex gap-3">
+                            <button onClick={handleExport} className="flex-1 bg-emerald-50 text-emerald-600 py-3 rounded-xl font-bold text-xs flex justify-center items-center gap-1 border border-emerald-100"><i className="ph ph-download-simple text-base"></i>导出备份</button>
+                            <button onClick={()=>fileRef.current.click()} className="flex-1 bg-slate-900 text-white py-3 rounded-xl font-bold text-xs flex justify-center items-center gap-1"><i className="ph ph-upload-simple text-base"></i>导入恢复</button>
+                            <input type="file" ref={fileRef} onChange={handleImport} accept=".json" className="hidden" />
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-4">
+                        <h3 className="font-black text-slate-800 text-sm flex items-center gap-2"><i className="ph-fill ph-receipt text-blue-500"></i>小票基础信息</h3>
+                        <div className="p-4 bg-slate-50 rounded-2xl space-y-1">
+                            <p className="text-xs font-black text-slate-800 uppercase">{settings?.storeName}</p>
+                            <p className="text-[10px] text-slate-500 font-bold">{settings?.regNo}</p>
+                            <p className="text-[10px] text-slate-400 leading-relaxed font-medium mt-1">{settings?.address}</p>
+                        </div>
+                        <p className="text-[10px] text-slate-400 font-bold text-center">高级修改(如Logo、页脚)请在电脑端操作</p>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- 独立弹窗: 小票显示 ---
+        function ReceiptModal({ data, settings, onClose }) {
+            return (
+                <div className="fixed inset-0 bg-black/90 z-[100] flex flex-col items-center justify-center p-6 backdrop-blur-xl animate-fade-in">
+                    <div className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden shadow-2xl flex flex-col animate-slide-up">
+                        <div className="overflow-y-auto p-8 flex-1 no-scrollbar">
+                            <div className="thermal-receipt text-center text-[10px] space-y-1">
+                                <h2 className="text-lg font-black leading-tight uppercase tracking-tight">{settings?.storeName}</h2>
+                                <p className="font-bold">Co.Reg: {settings?.regNo}</p>
+                                <p className="whitespace-pre-wrap font-medium text-slate-500">{settings?.address}</p>
+                                <div className="receipt-dashed"></div>
+                                <div className="text-left space-y-0.5 font-bold">
+                                    <p>REF NO: {data.receiptNo}</p><p>DATE: {data.date} {data.time}</p>
+                                </div>
+                                <div className="receipt-dashed"></div>
+                                <table className="w-full text-left">
+                                    <thead><tr className="font-black uppercase"><th className="pb-1">Items</th><th className="text-center pb-1">Qty</th><th className="text-right pb-1">Unit</th></tr></thead>
+                                    <tbody className="font-medium">{data.items.map((i,idx)=>(<tr key={idx}><td className="py-1 font-black uppercase text-slate-800">{i.product.name}</td><td className="text-center py-1 font-bold">{i.qty}</td><td className="text-right py-1 font-bold">RM{i.customPrice.toFixed(2)}</td></tr>))}</tbody>
+                                </table>
+                                <div className="receipt-dashed"></div>
+                                <div className="space-y-1 font-bold uppercase text-[9px] text-slate-400 pt-1">
+                                    <div className="flex justify-between"><span>Subtotal</span><span className="text-slate-800">RM {data.subtotal.toFixed(2)}</span></div>
+                                    <div className="flex justify-between"><span>Discount</span><span className="text-slate-800">RM {(data.discount||0).toFixed(2)}</span></div>
+                                    <div className="flex justify-between"><span>Rounding</span><span className="text-slate-800">RM {data.rounding.toFixed(2)}</span></div>
+                                    <div className="flex justify-between text-base font-black pt-2 text-blue-600 tracking-tighter"><span>Net Total</span><span>RM {data.totalRevenue.toFixed(2)}</span></div>
+                                </div>
+                                <div className="receipt-dashed"></div>
+                                <p className="mt-6 font-black uppercase text-[8px] text-slate-300">{settings?.footerText}</p>
+                            </div>
+                        </div>
+                        <div className="p-6 bg-slate-50 flex gap-2">
+                            <button onClick={()=>window.print()} className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-black shadow-lg">打印</button>
+                            <button onClick={onClose} className="flex-1 bg-slate-200 text-slate-600 py-3 rounded-xl font-black">完成</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
