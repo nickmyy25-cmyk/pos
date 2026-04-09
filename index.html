@@ -18,10 +18,11 @@
             theme: {
                 extend: {
                     fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['Courier New', 'monospace'] },
-                    animation: { 'slide-up': 'slideUp 0.3s ease-out', 'fade-in': 'fadeIn 0.2s ease-out', 'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite' },
+                    animation: { 'slide-up': 'slideUp 0.3s ease-out', 'fade-in': 'fadeIn 0.2s ease-out', 'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite', 'scan-line': 'scanLine 2s linear infinite' },
                     keyframes: {
                         slideUp: { '0%': { transform: 'translateY(100%)' }, '100%': { transform: 'translateY(0)' } },
-                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } }
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+                        scanLine: { '0%': { top: '0%' }, '50%': { top: '100%' }, '100%': { top: '0%' } }
                     }
                 }
             }
@@ -45,8 +46,7 @@
         .pb-safe { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
         .pt-safe { padding-top: max(1rem, env(safe-area-inset-top)); }
         
-        #reader__scan_region { background: #000 !important; }
-        #reader__dashboard_section_csr button { background: #3b82f6 !important; color: white !important; padding: 8px 16px !important; border-radius: 12px !important; font-size: 14px !important; font-weight: 600 !important; }
+        #reader video { object-fit: cover !important; width: 100% !important; height: 100% !important; border-radius: 0 !important; }
         
         input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         .thermal-receipt { font-family: 'Courier New', monospace; background: white; color: black; }
@@ -102,27 +102,112 @@
             phone: '+60-12 266 2086', email: 'TabiTabimyy@gmail.com', footerText: '*** Thank You , Please Come Again ***'
         };
 
-        // --- 核心扫码器组件 ---
+        // --- 核心扫码器组件 (安卓后置主摄专属优化版) ---
         function CameraScanner({ onScan, onClose }) {
             useEffect(() => {
-                const scanner = new Html5QrcodeScanner("reader", { fps: 15, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0, showTorchButtonIfSupported: true });
-                scanner.render((text) => {
-                    if (window.navigator.vibrate) window.navigator.vibrate(100);
-                    const beep = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFRm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTvv7+9v");
-                    beep.play().catch(()=>{});
-                    onScan(text);
-                    scanner.clear().then(onClose);
-                }, (err) => {});
-                return () => scanner.clear().catch(() => {});
-            }, []);
+                const html5QrCode = new Html5Qrcode("reader");
+                const config = { 
+                    fps: 20, 
+                    qrbox: { width: 260, height: 160 }, 
+                    aspectRatio: window.innerWidth / window.innerHeight,
+                    disableFlip: false 
+                };
+                
+                let isUnmounted = false;
+
+                const startScanner = async () => {
+                    try {
+                        // 1. 尝试获取所有摄像头，精准锁定后置主摄 (解决部分安卓机 facingMode 失效或选错微距镜头的问题)
+                        const devices = await Html5Qrcode.getCameras();
+                        let cameraConfig = { facingMode: "environment" };
+
+                        if (devices && devices.length > 0) {
+                            const backCameras = devices.filter(d => 
+                                d.label.toLowerCase().includes('back') || 
+                                d.label.toLowerCase().includes('rear') || 
+                                d.label.toLowerCase().includes('environment') ||
+                                d.label.toLowerCase().includes('0') // 安卓底层 API 通常将主摄标记为包含 '0' 的标识符
+                            );
+                            if (backCameras.length > 0) {
+                                cameraConfig = { deviceId: { exact: backCameras[0].id } };
+                            } else if (devices.length > 1) {
+                                // 如果没有明确标识，大概率最后一个是后置镜头
+                                cameraConfig = { deviceId: { exact: devices[devices.length - 1].id } };
+                            }
+                        }
+
+                        if (isUnmounted) return;
+
+                        await html5QrCode.start(
+                            cameraConfig,
+                            config,
+                            (decodedText) => {
+                                if (window.navigator.vibrate) window.navigator.vibrate(100);
+                                const beep = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFRm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTvv7+9v");
+                                beep.play().catch(()=>{});
+                                
+                                html5QrCode.stop().then(() => {
+                                    if (!isUnmounted) { onScan(decodedText); onClose(); }
+                                }).catch(() => {
+                                    if (!isUnmounted) { onScan(decodedText); onClose(); }
+                                });
+                            },
+                            (errorMessage) => { /* 忽略扫描噪点导致的报错帧 */ }
+                        );
+                    } catch (err) {
+                        // 2. 如果硬件精准锁定失败，回退到基础模式
+                        if (!isUnmounted) {
+                            html5QrCode.start(
+                                { facingMode: "environment" },
+                                config,
+                                (decodedText) => {
+                                    if (window.navigator.vibrate) window.navigator.vibrate(100);
+                                    html5QrCode.stop().catch(()=>{});
+                                    if (!isUnmounted) { onScan(decodedText); onClose(); }
+                                },
+                                () => {}
+                            ).catch(e => {
+                                if (!isUnmounted) {
+                                    alert("无法启动后置摄像头，请检查浏览器相机授权。");
+                                    onClose();
+                                }
+                            });
+                        }
+                    }
+                };
+
+                startScanner();
+
+                return () => {
+                    isUnmounted = true;
+                    if (html5QrCode.isScanning) {
+                        html5QrCode.stop().catch(() => {});
+                    }
+                };
+            }, [onScan, onClose]);
 
             return (
                 <div className="fixed inset-0 bg-black z-[100] flex flex-col pt-safe">
-                    <div className="flex justify-between items-center p-4 bg-slate-900 text-white shadow-lg">
-                        <span className="font-bold flex items-center gap-2"><i className="ph ph-scan text-blue-400"></i>条码扫描</span>
+                    <div className="flex justify-between items-center p-4 bg-slate-900 text-white shadow-lg z-10 relative">
+                        <span className="font-bold flex items-center gap-2"><i className="ph ph-scan text-blue-400"></i>自动识别条码</span>
                         <button onClick={onClose} className="p-2 bg-slate-800 rounded-full active:scale-90"><i className="ph ph-x text-xl"></i></button>
                     </div>
-                    <div className="flex-1 bg-black flex items-center justify-center"><div id="reader" className="w-full"></div></div>
+                    
+                    <div className="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+                        {/* 纯净的视频流容器 */}
+                        <div id="reader" className="w-full h-full absolute inset-0"></div>
+                        
+                        {/* 纯净科技感 UI 覆盖层：上下扫描的蓝色激光线 */}
+                        <div className="absolute inset-0 pointer-events-none flex justify-center items-center z-20">
+                            <div className="w-[260px] h-[160px] border-2 border-blue-500/50 rounded-xl relative overflow-hidden">
+                                <div className="absolute left-0 right-0 h-[2px] bg-blue-400 shadow-[0_0_12px_rgba(59,130,246,1)] animate-scan-line"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div className="p-6 bg-slate-900 text-center text-slate-400 text-xs pb-safe relative z-10">
+                        系统已强制锁定后置主摄像头，请将条码对准上方框内
+                    </div>
                 </div>
             );
         }
